@@ -1,0 +1,1195 @@
+#!/usr/bin/env python3
+"""
+schema_generator.py
+Autonomous schema markup generator for any webpage.
+Analyzes HTML signals, scores confidence, and generates implementation-ready JSON-LD.
+"""
+import sys, json, re, urllib.request, urllib.error
+from html.parser import HTMLParser
+from collections import defaultdict
+
+CONFIDENCE_THRESHOLD = 0.65
+AMBIGUITY_THRESHOLD = 0.15
+
+# Signal patterns for detection
+PRODUCT_SIGNALS = {
+    'price': (r'[\$£€]\d+(?:,\d{3})*(?:\.\d{2})?|\d+(?:\.\d{2})?\s*(?:USD|GBP|EUR)', 0.35),
+    'sku': (r'\b(?:SKU|Model|Product\s*ID)[:\s]*[A-Z0-9\-]+', 0.25),
+    'cart_button': (r'(?:add\s*to\s*cart|buy\s*now|checkout)', 0.20),
+    'specifications': (r'(?:specifications?|specs|features?|details)', 0.15),
+    'reviews': (r'(?:reviews?|ratings?|stars?|rating)', 0.10),
+    'availability': (r'(?:in\s*stock|available|out\s*of\s*stock|ships?\s*in)', 0.10),
+    'variants': (r'(?:size|color|option|variant|selection)', 0.08),
+}
+
+ARTICLE_SIGNALS = {
+    'pub_date': (r'(?:published|posted|updated|modified)\s*(?:on)?[:\s]*\d{4}[-/]\d{2}[-/]\d{2}', 0.30),
+    'author': (r'(?:by|author|written)\s*(?:by)?[:\s]*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+', 0.25),
+    'reading_time': (r'\d+\s*(?:min|minute)\s*(?:read|reading)', 0.15),
+    'toc': (r'(?:table\s*of\s*contents|on\s*this\s*page|jump\s*to)', 0.15),
+    'blog_layout': (r'(?:blog|article|post|news)', 0.10),
+}
+
+SERVICE_SIGNALS = {
+    'cta': (r'(?:get\s*a\s*quote|contact\s*us|request\s*consultation|book\s*now|schedule)', 0.30),
+    'lead_form': (r'<form[^>]*>', 0.25),
+    'benefits': (r'(?:benefits?|why\s*choose|advantages?|what\s*we\s*offer)', 0.20),
+    'no_pricing': (r'^(?!.*(?:price|cost|\$|£|€)).*$', 0.15),
+}
+
+FAQ_SIGNALS = {
+    'accordion': (r'(?:accordion|collapse|toggle|expand)', 0.25),
+    'qa_structure': (r'(?:<dt>|<dd>|itemscope.*question|itemscope.*answer)', 0.30),
+    'questions': (r'(?:\?|how\s*to|what\s*is|why|when|where|who|can\s*i|do\s*i)', 0.25),
+}
+
+ORGANIZATION_SIGNALS = {
+    'logo': (r'<img[^>]*logo[^>]*>|<img[^>]*brand[^>]*>', 0.30),
+    'company_name': (r'(?:©|&copy;|copyright)\s*\d{4}\s*([A-Z][A-Za-z\s&]+)', 0.25),
+    'contact': (r'(?:contact|phone|email|address)', 0.20),
+    'social': (r'(?:facebook\.com|twitter\.com|linkedin\.com|instagram\.com)', 0.15),
+}
+
+FINANCE_SIGNALS = {
+    'apr': (r'\b\d+(?:\.\d+)?\s*%\s*APR\b', 0.35),
+    'loan_calc': (r'(?:loan\s*calculator|payment\s*calculator|finance\s*calculator)', 0.30),
+    'eligibility': (r'(?:eligibility|qualify|criteria|requirements)', 0.20),
+    'finance_terms': (r'(?:hire\s*purchase|conditional\s*sale|pcp|hp|cs)', 0.25),
+}
+
+SOFTWARE_SIGNALS = {
+    'features': (r'(?:features?|capabilities|functionality)', 0.20),
+    'pricing_tiers': (r'(?:basic|pro|enterprise|starter|premium)\s*(?:plan|tier)?', 0.25),
+    'platform': (r'(?:windows|mac|linux|ios|android|web-based|cloud)', 0.15),
+    'download': (r'(?:download|install|get\s*started|free\s*trial)', 0.20),
+}
+
+BREADCRUMB_SIGNALS = {
+    'nav_hierarchy': (r'(?:breadcrumb|navigation|home\s*>\s*|>\s*)', 0.30),
+    'breadcrumb_list': (r'<nav[^>]*breadcrumb[^>]*>|<ol[^>]*breadcrumb', 0.40),
+}
+
+MEDIA_SIGNALS = {
+    'video': (r'<(?:video|iframe[^>]*youtube|iframe[^>]*vimeo)', 0.40),
+    'image_gallery': (r'(?:gallery|slideshow|carousel|lightbox)', 0.25),
+    'audio': (r'<audio|<iframe[^>]*soundcloud|<iframe[^>]*spotify', 0.35),
+}
+
+CATEGORY_SIGNALS = {
+    'product_grid': (r'(?:product-grid|product-list|item-grid|catalog)', 0.30),
+    'filters': (r'(?:filter|sort|refine|narrow)', 0.25),
+    'pagination': (r'(?:pagination|page\s*\d+|next\s*page|load\s*more)', 0.20),
+    'product_cards': (r'(?:product-card|item-card|listing)', 0.25),
+}
+
+HOWTO_SIGNALS = {
+    'steps': (r'(?:step\s*\d+|step\s*one|first|second|third|finally|next|then)', 0.30),
+    'numbered_list': (r'<ol[^>]*>|<li[^>]*>\d+\.', 0.25),
+    'instructions': (r'(?:how\s*to|guide|tutorial|instructions|method)', 0.25),
+}
+
+DATASET_SIGNALS = {
+    'comparison_table': (r'<table[^>]*>(?:.*?comparison|compare|vs|versus)', 0.35),
+    'structured_data': (r'<table[^>]*>(?:.*?<th>.*?</th>.*?<td>){3,}', 0.30),
+    'data_rows': (r'(?:lender|provider|product\s*type|age|loan\s*value|min|max)', 0.25),
+}
+
+
+class HTMLSignalExtractor(HTMLParser):
+    """Extract structured signals from HTML."""
+    
+    def __init__(self):
+        super().__init__()
+        self.title = ''
+        self.meta_desc = ''
+        self.canonical = ''
+        self.og_tags = {}
+        self.twitter_tags = {}
+        self.headings = defaultdict(list)
+        self.in_heading = False
+        self.current_heading = ''
+        self.heading_level = 0
+        self.links = []
+        self.images = []
+        self.forms = []
+        self.text_content = []
+        self.in_script = False
+        self.scripts = []
+        self.in_ol = False
+        self.list_items = []
+        self.tables = []
+        self.in_table = False
+        self.current_table = []
+        self.videos = []
+        self.faq_questions = []
+        self.faq_pairs = []  # Store Q&A pairs
+        self.in_faq = False
+        self.current_faq_question = None
+        self.current_faq_answer = ''
+        self.in_faq_question = False
+        self.in_faq_answer = False
+        
+    def handle_starttag(self, tag, attrs):
+        attrs_dict = dict(attrs)
+        
+        if tag == 'title':
+            self.in_heading = True
+            self.heading_level = 0
+        elif tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            self.in_heading = True
+            self.heading_level = int(tag[1])
+            self.current_heading = ''
+        elif tag == 'meta':
+            name = attrs_dict.get('name', '').lower()
+            prop = attrs_dict.get('property', '').lower()
+            content = attrs_dict.get('content', '')
+            
+            if name == 'description':
+                self.meta_desc = content
+            elif prop.startswith('og:'):
+                self.og_tags[prop[3:]] = content
+            elif name.startswith('twitter:'):
+                self.twitter_tags[name[8:]] = content
+        elif tag == 'link':
+            if attrs_dict.get('rel') == ['canonical']:
+                self.canonical = attrs_dict.get('href', '')
+        elif tag == 'a':
+            self.links.append(attrs_dict.get('href', ''))
+        elif tag == 'img':
+            self.images.append(attrs_dict.get('src', ''))
+        elif tag == 'form':
+            self.forms.append(attrs_dict)
+        elif tag == 'script':
+            self.in_script = True
+            self.current_script = ''
+        elif tag == 'ol':
+            self.in_ol = True
+        elif tag == 'li' and self.in_ol:
+            pass
+        elif tag == 'table':
+            self.in_table = True
+            self.current_table = []
+        elif tag == 'tr' and self.in_table:
+            pass
+        elif tag == 'iframe':
+            # Check data-src first (lazy loading), then src
+            src = attrs_dict.get('data-src', '') or attrs_dict.get('src', '')
+            if 'youtube' in src or 'youtu.be' in src or 'vimeo' in src:
+                video_id = re.search(r'(?:v=|embed/|\.be/)([a-zA-Z0-9_-]+)', src)
+                if video_id:
+                    self.videos.append({
+                        'embed_url': src,
+                        'video_id': video_id.group(1),
+                        'platform': 'youtube' if 'youtube' in src or 'youtu.be' in src else 'vimeo'
+                    })
+        elif tag == 'section' or tag == 'div':
+            # Check for FAQ section
+            class_attr = attrs_dict.get('class', '')
+            if 'faq' in class_attr.lower() or 'accordion' in class_attr.lower():
+                self.in_faq = True
+                self.current_faq_question = None
+                self.current_faq_answer = ''
+        
+    def handle_endtag(self, tag):
+        if tag == 'title' and self.in_heading:
+            self.in_heading = False
+        elif tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] and self.in_heading:
+            self.headings[self.heading_level].append(self.current_heading.strip())
+            self.in_heading = False
+        elif tag == 'script':
+            self.in_script = False
+            if self.current_script.strip():
+                self.scripts.append(self.current_script.strip())
+        elif tag == 'ol':
+            self.in_ol = False
+        elif tag == 'table':
+            self.in_table = False
+            if self.current_table:
+                self.tables.append(self.current_table)
+        elif tag in ['section', 'div'] and self.in_faq:
+            # End of FAQ section
+            if self.current_faq_question and self.current_faq_answer.strip():
+                self.faq_pairs.append({
+                    'question': self.current_faq_question,
+                    'answer': self.current_faq_answer.strip()
+                })
+            self.in_faq = False
+    
+    def handle_data(self, data):
+        if self.in_heading:
+            if self.heading_level == 0:
+                self.title += data
+            else:
+                self.current_heading += data
+        elif self.in_script:
+            self.current_script += data
+        elif self.in_ol:
+            stripped = data.strip()
+            if stripped:
+                self.list_items.append(stripped)
+        elif self.in_table:
+            stripped = data.strip()
+            if stripped:
+                self.current_table.append(stripped)
+        elif self.in_faq:
+            if self.in_faq_question:
+                self.current_faq_question += data
+            elif self.in_faq_answer:
+                self.current_faq_answer += data
+        else:
+            self.text_content.append(data.strip())
+        
+        # Detect FAQ questions from headings
+        if re.search(r'^\s*(?:how\s*|what\s*|why\s*|when\s*|where\s*|who\s*|can\s*i|do\s*i|is\s*it|are\s*there)', data, re.IGNORECASE) and '?' in data:
+            question = data.strip().rstrip('?')
+            if question and question not in [q for q, _ in self.faq_questions]:
+                self.faq_questions.append((question, ''))  # Empty answer for now
+    
+    def get_full_text(self):
+        return ' '.join(self.text_content)
+
+
+def fetch_url(url):
+    """Fetch URL content with headers."""
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-GB,en;q=0.9',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read().decode('utf-8', errors='ignore')
+    except Exception as e:
+        print(f"Error fetching URL: {e}", file=sys.stderr)
+        return None
+
+
+def extract_existing_schema(html):
+    """Extract existing JSON-LD from page."""
+    import html as html_module
+    schemas = []
+    pattern = r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>'
+    matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+    for match in matches:
+        try:
+            # Clean up the JSON (remove extra whitespace, decode HTML entities)
+            cleaned = match.strip()
+            # Decode HTML entities
+            cleaned = html_module.unescape(cleaned)
+            schema = json.loads(cleaned)
+            schemas.append(schema)
+        except json.JSONDecodeError as e:
+            pass
+    return schemas
+
+
+def extract_faq_from_existing_schema(existing_schemas):
+    """Extract FAQPage from existing schema if present."""
+    for schema in existing_schemas:
+        if isinstance(schema, dict):
+            # Direct FAQPage
+            if schema.get('@type') == 'FAQPage':
+                return schema
+            # FAQPage in @graph
+            if '@graph' in schema:
+                for item in schema['@graph']:
+                    if isinstance(item, dict) and item.get('@type') == 'FAQPage':
+                        return item
+    return None
+
+
+def detect_signals(html, text, parser):
+    """Detect all schema signals in content."""
+    signals = defaultdict(list)
+    
+    # Product signals (exclude finance pages)
+    is_finance_page = any(
+        re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE)
+        for pattern, _ in FINANCE_SIGNALS.values()
+    )
+    
+    if not is_finance_page:
+        for name, (pattern, score) in PRODUCT_SIGNALS.items():
+            if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+                signals['Product'].append((name, score))
+    
+    # Article signals
+    for name, (pattern, score) in ARTICLE_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['Article'].append((name, score))
+    
+    # Service signals
+    for name, (pattern, score) in SERVICE_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['Service'].append((name, score))
+    
+    # FAQ signals
+    for name, (pattern, score) in FAQ_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['FAQPage'].append((name, score))
+    
+    # Add FAQ questions detected
+    if parser.faq_questions:
+        signals['FAQPage'].append(('questions_found', min(0.5, len(parser.faq_questions) * 0.1)))
+    
+    # Organization signals
+    for name, (pattern, score) in ORGANIZATION_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['Organization'].append((name, score))
+    
+    # Finance signals - ONLY for FinancialProduct, NOT Product
+    for name, (pattern, score) in FINANCE_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['FinancialProduct'].append((name, score))
+    
+    # Software signals
+    for name, (pattern, score) in SOFTWARE_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['SoftwareApplication'].append((name, score))
+    
+    # Breadcrumb signals
+    for name, (pattern, score) in BREADCRUMB_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['BreadcrumbList'].append((name, score))
+    
+    # Media signals
+    for name, (pattern, score) in MEDIA_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            if 'video' in name:
+                signals['VideoObject'].append((name, score))
+            elif 'image' in name:
+                signals['ImageObject'].append((name, score))
+            elif 'audio' in name:
+                signals['AudioObject'].append((name, score))
+    
+    # Add detected videos
+    if parser.videos:
+        signals['VideoObject'].append(('videos_found', min(0.5, len(parser.videos) * 0.25)))
+    
+    # Category signals
+    for name, (pattern, score) in CATEGORY_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['CollectionPage'].append((name, score))
+            signals['ItemList'].append((name, score * 0.9))
+    
+    # HowTo signals
+    for name, (pattern, score) in HOWTO_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['HowTo'].append((name, score))
+    
+    # Add detected steps
+    if parser.list_items and len(parser.list_items) >= 3:
+        signals['HowTo'].append(('steps_found', min(0.5, len(parser.list_items) * 0.1)))
+    
+    # Dataset signals
+    for name, (pattern, score) in DATASET_SIGNALS.items():
+        if re.search(pattern, html, re.IGNORECASE) or re.search(pattern, text, re.IGNORECASE):
+            signals['Dataset'].append((name, score))
+    
+    # Add detected tables
+    if parser.tables:
+        signals['Dataset'].append(('tables_found', min(0.4, len(parser.tables) * 0.15)))
+    
+    return signals
+
+
+def calculate_confidence(signals):
+    """Calculate confidence scores for each schema type."""
+    scores = {}
+    reasoning = {}
+    for schema_type, signal_list in signals.items():
+        raw_score = sum(score for _, score in signal_list)
+        # Cap at 1.0, apply diminishing returns
+        confidence = min(1.0, raw_score)
+        # Penalty for too few signals
+        if len(signal_list) < 2:
+            confidence *= 0.7
+        scores[schema_type] = round(confidence, 2)
+        reasoning[schema_type] = [name for name, _ in signal_list]
+    return scores, reasoning
+
+
+def extract_metadata(parser):
+    """Extract metadata from parsed HTML."""
+    metadata = {
+        'title': parser.title.strip(),
+        'description': parser.meta_desc,
+        'canonical': parser.canonical,
+        'og_image': parser.og_tags.get('image'),
+        'og_type': parser.og_tags.get('type'),
+        'published_time': parser.og_tags.get('published_time'),
+        'modified_time': parser.og_tags.get('modified_time'),
+        'author': None,
+        'headings': dict(parser.headings),
+    }
+    
+    # Try to find author in headings or text
+    for level in [1, 2, 3]:
+        for heading in parser.headings.get(level, []):
+            if re.search(r'by\s+[A-Z]', heading, re.IGNORECASE):
+                match = re.search(r'by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)', heading)
+                if match:
+                    metadata['author'] = match.group(1)
+                    break
+    
+    return metadata
+
+
+def determine_primary_entity(scores, reasoning, html):
+    """Determine primary entity based on confidence scores and page intent."""
+    if not scores:
+        return None, 0, None
+    
+    # Check if this is a finance page - prioritize FinancialProduct/Service
+    is_finance_page = any(
+        re.search(pattern, html, re.IGNORECASE)
+        for pattern, _ in FINANCE_SIGNALS.values()
+    )
+    
+    # Sort by score
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+    
+    # For finance pages, boost FinancialProduct/Service to top
+    if is_finance_page:
+        finance_types = ['FinancialProduct', 'Service', 'LoanOrCredit']
+        for schema_type in finance_types:
+            if schema_type in scores and scores[schema_type] >= 0.5:
+                # Re-sort with finance type first
+                sorted_scores = [(schema_type, scores[schema_type])] + [
+                    (t, s) for t, s in sorted_scores if t != schema_type
+                ]
+                break
+    
+    # For FAQ pages, don't make FAQ the primary unless no other strong entity
+    if sorted_scores and sorted_scores[0][0] == 'FAQPage':
+        if len(sorted_scores) > 1 and sorted_scores[1][1] >= 0.5:
+            # Use second highest as primary, FAQ as supporting
+            sorted_scores = [sorted_scores[1]] + [sorted_scores[0]] + sorted_scores[2:]
+    
+    # Check for close scores (ambiguity)
+    ambiguity = None
+    if len(sorted_scores) >= 2:
+        top_score = sorted_scores[0][1]
+        second_score = sorted_scores[1][1]
+        if top_score - second_score < AMBIGUITY_THRESHOLD and top_score < 0.85:
+            ambiguity = {
+                'primary': sorted_scores[0][0],
+                'primary_score': top_score,
+                'alternative': sorted_scores[1][0],
+                'alternative_score': second_score
+            }
+    
+    return sorted_scores[0][0], sorted_scores[0][1], ambiguity
+
+
+def generate_json_ld(schema_type, metadata, signals, sitewide_entities=None, parser=None, html=None):
+    """Generate JSON-LD for the primary schema type."""
+    schema = {"@context": "https://schema.org"}
+    
+    if schema_type == 'Product':
+        schema["@type"] = "Product"
+        schema["name"] = metadata.get('title', '')
+        if metadata.get('description'):
+            schema["description"] = metadata['description']
+        if metadata.get('og_image'):
+            schema["image"] = metadata['og_image']
+        if metadata.get('canonical'):
+            schema["url"] = metadata['canonical']
+        
+        # Add Offer if price detected
+        if any('price' in s[0] for s in signals.get('Product', [])):
+            schema["offers"] = {
+                "@type": "Offer",
+                "priceCurrency": "GBP",
+                "availability": "https://schema.org/InStock"
+            }
+    
+    elif schema_type == 'FinancialProduct':
+        schema["@type"] = "FinancialProduct"
+        schema["name"] = metadata.get('title', '')
+        if metadata.get('description'):
+            schema["description"] = metadata['description']
+        if metadata.get('canonical'):
+            schema["url"] = metadata['canonical']
+        
+        # Add loanType if finance terms detected
+        finance_signals = signals.get('FinancialProduct', [])
+        if any('apr' in s[0] for s in finance_signals):
+            # Extract APR from HTML (handle spans/tags)
+            apr_match = re.search(r'(\d+(?:\.\d+)?)\s*%\s*APR', html, re.IGNORECASE)
+            if not apr_match:
+                # Try with HTML tags
+                apr_match = re.search(r'(\d+(?:\.\d+)?)\s*%</span>\s*APR', html, re.IGNORECASE)
+            if not apr_match:
+                # Try REPRESENTATIVE APR pattern
+                apr_match = re.search(r'REPRESENTATIVE\s+APR\s+(?:of\s+)?(?:\u003c[^\u003e]+>)*(\d+(?:\.\d+)?)%', html, re.IGNORECASE)
+            if apr_match:
+                schema["interestRate"] = float(apr_match.group(1)) / 100
+        
+        if any('finance_terms' in s[0] or 'loan' in s[0] for s in finance_signals):
+            schema["loanType"] = "PersonalLoan"
+        
+        # Add provider if sitewide entities available
+        if sitewide_entities and sitewide_entities.get('organization_name'):
+            schema["provider"] = {
+                "@type": "Organization",
+                "name": sitewide_entities['organization_name']
+            }
+        elif metadata.get('title'):
+            # Extract from page title/domain
+            domain_match = re.search(r'(?:from|by|at)\s+([A-Z][A-Za-z\s]+)', metadata.get('description', ''))
+            if domain_match:
+                schema["provider"] = {
+                    "@type": "Organization",
+                    "name": domain_match.group(1).strip()
+                }
+    
+    elif schema_type == 'Service':
+        schema["@type"] = "Service"
+        schema["name"] = metadata.get('title', '')
+        if metadata.get('description'):
+            schema["description"] = metadata['description']
+        if sitewide_entities and sitewide_entities.get('organization_name'):
+            schema["provider"] = {
+                "@type": "Organization",
+                "name": sitewide_entities['organization_name']
+            }
+        if metadata.get('canonical'):
+            schema["url"] = metadata['canonical']
+    
+    elif schema_type == 'Article':
+        schema["@type"] = "Article"
+        schema["headline"] = metadata.get('title', '')
+        if metadata.get('description'):
+            schema["description"] = metadata['description']
+        if metadata.get('author'):
+            schema["author"] = {"@type": "Person", "name": metadata['author']}
+        if metadata.get('published_time'):
+            schema["datePublished"] = metadata['published_time']
+        if metadata.get('modified_time'):
+            schema["dateModified"] = metadata['modified_time']
+        if metadata.get('og_image'):
+            schema["image"] = metadata['og_image']
+    
+    elif schema_type == 'FAQPage':
+        # FAQPage should not be primary, but handle it
+        schema["@type"] = "FAQPage"
+        schema["mainEntity"] = []
+    
+    return schema
+
+
+def generate_breadcrumb(metadata, parser):
+    """Generate BreadcrumbList schema."""
+    base_url = '/'
+    
+    # Try to get homepage URL from canonical
+    if metadata.get('canonical'):
+        # Extract domain from canonical URL
+        domain_match = re.match(r'(https?://[^/]+)', metadata['canonical'])
+        if domain_match:
+            base_url = domain_match.group(1)
+    
+    breadcrumb = {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": 1,
+                "name": "Home",
+                "item": base_url
+            }
+        ]
+    }
+    
+    # Add current page
+    if metadata.get('title'):
+        breadcrumb["itemListElement"].append({
+            "@type": "ListItem",
+            "position": 2,
+            "name": metadata['title']
+        })
+        if metadata.get('canonical'):
+            breadcrumb["itemListElement"][1]["item"] = metadata['canonical']
+    
+    return breadcrumb
+
+
+def generate_organization(sitewide_entities=None, parser=None, html=None):
+    """Generate Organization schema."""
+    org_name = None
+    org_url = None
+    org_logo = None
+    
+    if sitewide_entities:
+        org_name = sitewide_entities.get('organization_name')
+        org_url = sitewide_entities.get('organization_url')
+        org_logo = sitewide_entities.get('organization_logo')
+    
+    # Extract from HTML if not available
+    if html and not org_name:
+        # Try to extract from copyright notice
+        copyright_match = re.search(r'©\s*\d{4}\s*([A-Za-z][A-Za-z\s]+?)(?:\.|All rights|$)', html, re.IGNORECASE)
+        if copyright_match:
+            org_name = copyright_match.group(1).strip()
+        
+        # Try to extract from logo alt text
+        if not org_name:
+            logo_match = re.search(r'<img[^>]*class="[^"]*logo[^"]*"[^>]*alt="([^"]+)"', html, re.IGNORECASE)
+            if logo_match:
+                org_name = logo_match.group(1).strip()
+        
+        # Try to extract from meta tags
+        if not org_name:
+            meta_match = re.search(r'<meta[^>]*name=["\']author["\'][^>]*content=["\']([^"]+)["\']', html, re.IGNORECASE)
+            if meta_match:
+                org_name = meta_match.group(1).strip()
+        
+        # Try to extract from og:site_name
+        if not org_name:
+            og_match = re.search(r'<meta[^>]*property=["\']og:site_name["\'][^>]*content=["\']([^"]+)["\']', html, re.IGNORECASE)
+            if og_match:
+                org_name = og_match.group(1).strip()
+        
+        # Try to extract from title pattern
+        if not org_name:
+            title_match = re.search(r'\|\s*([A-Za-z][A-Za-z\s]+?)$', html[:2000], re.IGNORECASE)
+            if title_match:
+                org_name = title_match.group(1).strip()
+    
+    # Fallback to domain extraction
+    if not org_name:
+        domain_match = re.search(r'https?://(?:www\.)?([^/]+)', html[:2000] if html else '')
+        if domain_match:
+            org_name = domain_match.group(1).replace('www.', '').split('.')[0].title()
+    
+    if not org_name:
+        org_name = "Organization Name"
+    
+    org = {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        "name": org_name
+    }
+    
+    if org_url:
+        org["url"] = org_url
+    if org_logo:
+        org["logo"] = org_logo
+    
+    return org
+
+
+def generate_faq(parser, html):
+    """Generate FAQPage schema by extracting Q&A from HTML content."""
+    faq_pairs = []
+    
+    # Method 1: Extract from Bootstrap accordion - find each card with question/answer
+    # Question is inside <span> within button inside h3/h4
+    card_iter = re.finditer(r'<div class="card"[^>]*>', html)
+    for card_match in card_iter:
+        start = card_match.end()
+        card_content = html[start:start+2000]  # Increased from 1500 to 2000
+        
+        # Look for question in span inside h3/h4
+        q_match = re.search(r'<h([234])[^>]*>.*?<span>([^<]+)</span>', card_content, re.IGNORECASE | re.DOTALL)
+        if not q_match:
+            continue
+        
+        question = q_match.group(2).strip()
+        if not question or '?' not in question:
+            continue
+        
+        # Look for answer in card-body p tag (capture all content including links)
+        answer_match = re.search(r'<div class="card-body[^"]*"[^>]*>\s*<p[^>]*>(.+?)</p>', card_content, re.IGNORECASE | re.DOTALL)
+        if answer_match:
+            # Strip HTML tags from answer but keep text content
+            answer = re.sub(r'<[^>]+>', ' ', answer_match.group(1)).strip()
+            answer = re.sub(r'\s+', ' ', answer)  # Normalize whitespace
+            faq_pairs.append({
+                'question': question.rstrip('?'),
+                'answer': answer
+            })
+    
+    # Method 2: Extract from FAQ sections with question/answer divs
+    if len(faq_pairs) < 3:
+        faq_section_pattern = r'<(?:div|section)[^>]*class="[^"]*(?:faq|accordion|qa|question-answer)[^"]*"[^>]*>(.*?)</(?:div|section)>'
+        faq_sections = re.findall(faq_section_pattern, html, re.IGNORECASE | re.DOTALL)
+        
+        for section in faq_sections:
+            # Extract questions (h2, h3, h4 with question marks or question words)
+            question_pattern = r'<h([234])[^>]*>([^<]+)</h\1>'
+            questions = re.findall(question_pattern, section, re.IGNORECASE)
+            
+            for level, question in questions:
+                if '?' in question or any(qw in question.lower() for qw in ['what', 'how', 'where', 'when', 'why', 'can', 'does', 'is', 'are', 'do']):
+                    # Try to find answer after question
+                    escaped_q = re.escape(question.strip()[:50])
+                    answer_pattern = rf'{escaped_q}[^<]*</h{level}>[^\u003c]*</div>[^\u003c]*<div class="card-body[^"]*"[^>]*>\s*<p[^>]*>([^<]+)'
+                    answer_match = re.search(answer_pattern, section, re.IGNORECASE | re.DOTALL)
+                    
+                    if answer_match:
+                        faq_pairs.append({
+                            'question': question.strip().rstrip('?'),
+                            'answer': answer_match.group(1).strip()
+                        })
+    
+    # Method 3: Extract from dt/dd structure
+    if not faq_pairs:
+        dt_dd_pattern = r'<dt[^>]*>([^<]+)</dt>\s*<dd[^>]*>([^<]+)</dd>'
+        dt_dd_matches = re.findall(dt_dd_pattern, html, re.IGNORECASE | re.DOTALL)
+        for question, answer in dt_dd_matches:
+            if '?' in question or any(qw in question.lower() for qw in ['what', 'how', 'where', 'when', 'why', 'can', 'does', 'is', 'are', 'do']):
+                faq_pairs.append({
+                    'question': question.strip().rstrip('?'),
+                    'answer': answer.strip()
+                })
+    
+    # Method 4: Extract from headings followed by paragraphs (fallback)
+    if not faq_pairs:
+        heading_pattern = r'<h([234])[^>]*>([^<]+)</h\1>\s*<p[^>]*>([^<]+)</p>'
+        heading_matches = re.findall(heading_pattern, html, re.IGNORECASE | re.DOTALL)
+        for level, question, answer in heading_matches:
+            question = question.strip()
+            if '?' in question or any(qw in question.lower() for qw in ['what', 'how', 'where', 'when', 'why', 'can', 'does', 'is', 'are', 'do']):
+                faq_pairs.append({
+                    'question': question.rstrip('?'),
+                    'answer': answer.strip()
+                })
+    
+    # Method 5: Use detected questions from parser and try to find answers
+    if not faq_pairs and parser.faq_questions:
+        for question_tuple in parser.faq_questions[:15]:
+            # Handle tuple or string
+            question = question_tuple[0] if isinstance(question_tuple, tuple) else question_tuple
+            answer = extract_answer_for_question(html, question)
+            if answer:
+                faq_pairs.append({
+                    'question': question.rstrip('?'),
+                    'answer': answer
+                })
+    
+    if not faq_pairs:
+        return None
+    
+    # Build FAQPage schema
+    faq = {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": []
+    }
+    
+    for pair in faq_pairs[:15]:  # Limit to 15 FAQs
+        faq["mainEntity"].append({
+            "@type": "Question",
+            "name": pair['question'].rstrip('?'),
+            "acceptedAnswer": {
+                "@type": "Answer",
+                "text": pair['answer']
+            }
+        })
+    
+    return faq
+
+
+def extract_answer_for_question(html, question):
+    """Extract answer text for a given question from HTML."""
+    # Escape special regex chars in question
+    escaped_question = re.escape(question[:50])  # Use first 50 chars
+    
+    # Look for paragraph after question heading
+    pattern = rf'{escaped_question}[^<]*</h[23]>\s*<p[^>]*>([^<]+)'
+    match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+    
+    if match:
+        return match.group(1).strip()
+    
+    # Try finding text in next sibling element
+    pattern = rf'{escaped_question}[^<]*</h[23]>\s*<div[^>]*>([^<]+)'
+    match = re.search(pattern, html, re.IGNORECASE | re.DOTALL)
+    
+    if match:
+        return match.group(1).strip()
+    
+    return None
+
+
+def generate_video_objects(parser, html=None):
+    """Generate VideoObject schemas from detected videos."""
+    if not parser.videos:
+        return []
+    
+    videos = []
+    for i, video in enumerate(parser.videos[:5]):  # Limit to 5 videos
+        video_schema = {
+            "@context": "https://schema.org",
+            "@type": "VideoObject",
+            "embedUrl": video['embed_url'],
+            "contentUrl": f"https://www.{video['platform']}.com/watch?v={video['video_id']}",
+            "thumbnailUrl": f"https://img.{video['platform']}.com/vi/{video['video_id']}/maxresdefault.jpg",
+            "name": f"Video {i+1}",
+            "description": f"Embedded {video['platform']} video"
+        }
+        
+        # Try to extract upload date from video metadata in HTML
+        if html:
+            # Look for upload date in nearby meta tags or text
+            upload_match = re.search(rf'{re.escape(video["video_id"])}[^"]*uploadDate[^"]*"([^"]+)"', html)
+            if upload_match:
+                video_schema["uploadDate"] = upload_match.group(1)
+            else:
+                # Use current date as fallback (better than nothing)
+                from datetime import datetime
+                video_schema["uploadDate"] = datetime.now().strftime("%Y-%m-%d")
+        
+        videos.append(video_schema)
+    
+    return videos
+
+
+def generate_howto(parser, html):
+    """Generate HowTo schema from detected steps."""
+    # Filter out breadcrumb-like items
+    if not parser.list_items:
+        return None
+    
+    # Skip items that look like navigation or headings
+    valid_steps = []
+    skip_patterns = [
+        r'^home$', r'^skip', r'^menu$', r'^contact', r'^about',
+        r'^bad credit', r'^car finance', r'^finance$', r'^what is',
+        r'^where', r'^eligibility', r'^types of', r'^can i',
+        r'^does ', r'^is ', r'^are ', r'^do ', r'^have ', r'^will '
+    ]
+    
+    for item in parser.list_items:
+        item = item.strip()
+        # Skip if matches skip patterns
+        if any(re.match(pattern, item, re.IGNORECASE) for pattern in skip_patterns):
+            continue
+        # Skip if too short or looks like heading
+        if len(item) < 20 or item.startswith('http') or item.endswith(':'):
+            continue
+        # Skip if it's a question (FAQ, not HowTo)
+        if item.endswith('?'):
+            continue
+        valid_steps.append(item)
+    
+    if len(valid_steps) < 2:
+        return None
+    
+    # Try to find HowTo name from HTML
+    howto_name = "How to complete this process"
+    if html:
+        # Look for "How to" heading
+        howto_heading = re.search(r'<h[23][^>]*>(How[^<]+)</h[23]>', html, re.IGNORECASE)
+        if howto_heading:
+            howto_name = howto_heading.group(1).strip()
+    
+    howto = {
+        "@context": "https://schema.org",
+        "@type": "HowTo",
+        "name": howto_name,
+        "step": []
+    }
+    
+    for i, item in enumerate(valid_steps[:10]):
+        howto["step"].append({
+            "@type": "HowToStep",
+            "text": item
+        })
+    
+    return howto
+
+
+def generate_dataset(parser):
+    """Generate Dataset schema from detected tables."""
+    if not parser.tables:
+        return None
+    
+    datasets = []
+    for i, table in enumerate(parser.tables[:3]):
+        dataset = {
+            "@context": "https://schema.org",
+            "@type": "Dataset",
+            "name": f"Data Table {i+1}",
+            "description": "Structured data extracted from page table",
+            "variableMeasured": table[:20]  # Limit variables
+        }
+        datasets.append(dataset)
+    
+    return datasets
+
+
+def check_ambiguity(scores, reasoning):
+    """Check for ambiguity and generate sanity check prompts."""
+    prompts = []
+    
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+    if len(sorted_scores) >= 2:
+        top = sorted_scores[0]
+        second = sorted_scores[1]
+        
+        if top[1] - second[1] < AMBIGUITY_THRESHOLD and top[1] < 0.85:
+            prompts.append({
+                'type': 'primary_entity',
+                'message': f"""Primary entity classification
+Detected {top[0]} ({top[1]} confidence)
+Alternative {second[0]} ({second[1]} confidence)
+
+Should this page be treated as a {top[0].lower()} or {second[0].lower()} page?""",
+                'reasoning': {
+                    'primary': reasoning.get(top[0], []),
+                    'alternative': reasoning.get(second[0], [])
+                }
+            })
+    
+    return prompts
+
+
+def generate_implementation_notes(primary_type, existing_schema, metadata):
+    """Generate implementation notes."""
+    notes = []
+    
+    notes.append("Place schema inside <head> section of page.")
+    
+    if existing_schema:
+        notes.append("Existing schema detected. Review for duplicates before adding new schema.")
+        notes.append("Merge entities where appropriate; avoid duplicate Organization blocks.")
+        
+        # Check for specific types
+        existing_types = set()
+        for schema in existing_schema:
+            if isinstance(schema, dict):
+                if '@type' in schema:
+                    existing_types.add(schema['@type'])
+                if '@graph' in schema:
+                    for item in schema['@graph']:
+                        if isinstance(item, dict) and '@type' in item:
+                            existing_types.add(item['@type'])
+        
+        if 'Organization' in existing_types:
+            notes.append("Replace existing Organization schema to avoid duplication.")
+        if 'BreadcrumbList' in existing_types:
+            notes.append("Merge with existing BreadcrumbList — add URLs to items.")
+    
+    # Add missing field suggestions
+    if primary_type in ['Product', 'FinancialProduct', 'Service']:
+        notes.append("Add ratingValue and reviewCount if available to strengthen AggregateRating eligibility.")
+    
+    return notes
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='Generate schema markup from URL or HTML')
+    parser.add_argument('--url', help='URL to analyze')
+    parser.add_argument('--html', help='Raw HTML content')
+    parser.add_argument('--sitewide-entities', help='JSON file with sitewide entities')
+    parser.add_argument('--existing-schema', help='Path to existing schema file')
+    parser.add_argument('--confidence-threshold', type=float, default=CONFIDENCE_THRESHOLD,
+                        help='Minimum confidence for auto-include')
+    parser.add_argument('--allow-validation', type=str, default='false',
+                        help='Prompt user on low-confidence decisions')
+    parser.add_argument('--report', action='store_true',
+                        help='Generate Google Doc report in addition to schema output')
+    
+    args = parser.parse_args()
+    
+    # Fetch or use provided HTML
+    if args.url:
+        html = fetch_url(args.url)
+        if not html:
+            print("Failed to fetch URL", file=sys.stderr)
+            sys.exit(1)
+    elif args.html:
+        html = args.html
+    else:
+        print("Error: --url or --html required", file=sys.stderr)
+        sys.exit(1)
+    
+    # Parse HTML
+    html_parser = HTMLSignalExtractor()
+    html_parser.feed(html)
+    text = html_parser.get_full_text()
+    metadata = extract_metadata(html_parser)
+    
+    # Load sitewide entities
+    sitewide_entities = None
+    if args.sitewide_entities:
+        try:
+            with open(args.sitewide_entities, 'r', encoding='utf-8-sig') as f:
+                sitewide_entities = json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load sitewide entities: {e}", file=sys.stderr)
+    
+    # Load existing schema
+    existing_schema = []
+    existing_faq = None
+    if args.existing_schema:
+        try:
+            with open(args.existing_schema, 'r', encoding='utf-8-sig') as f:
+                existing_html = f.read()
+                existing_schema = extract_existing_schema(existing_html)
+                existing_faq = extract_faq_from_existing_schema(existing_schema)
+        except Exception as e:
+            print(f"Warning: Could not load existing schema: {e}", file=sys.stderr)
+    
+    # Also check the fetched page for existing schema
+    page_existing_schema = extract_existing_schema(html)
+    if page_existing_schema:
+        existing_schema.extend(page_existing_schema)
+        if not existing_faq:
+            existing_faq = extract_faq_from_existing_schema(page_existing_schema)
+    
+    # Detect signals
+    signals = detect_signals(html, text, html_parser)
+    scores, reasoning = calculate_confidence(signals)
+    
+    # Determine primary entity
+    primary_type, primary_score, ambiguity = determine_primary_entity(scores, reasoning, html)
+    
+    # Print header
+    print("=" * 60)
+    print("  SCHEMA MARKUP GENERATOR")
+    print("=" * 60)
+    print(f"\nPage Title: {metadata['title']}\n")
+    
+    # Print schema opportunity summary
+    print("-" * 60)
+    print("SCHEMA OPPORTUNITY SUMMARY")
+    print("-" * 60)
+    
+    if primary_type:
+        print(f"\nPrimary Entity: {primary_type} (confidence {primary_score})")
+        print(f"Reasoning: Detected {', '.join(reasoning.get(primary_type, [])[:5])}")
+    
+    print("\nSupporting Entities:")
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+    for schema_type, score in sorted_scores:
+        if schema_type != primary_type and score >= args.confidence_threshold:
+            reasons = reasoning.get(schema_type, [])
+            print(f"  • {schema_type} ({score}) - {', '.join(reasons[:3])}")
+    
+    # Check for ambiguity and print sanity checks
+    sanity_prompts = check_ambiguity(scores, reasoning)
+    if sanity_prompts and args.allow_validation.lower() == 'true':
+        print("\n" + "-" * 60)
+        print("SANITY CHECKS REQUIRED")
+        print("-" * 60)
+        for prompt in sanity_prompts:
+            print(f"\n{prompt['message']}")
+    
+    # Generate JSON-LD
+    print("\n" + "-" * 60)
+    print("GENERATED JSON-LD SCHEMA")
+    print("-" * 60)
+    
+    graph = []
+    
+    # Primary entity
+    if primary_type:
+        primary_schema = generate_json_ld(primary_type, metadata, signals, sitewide_entities, html_parser, html)
+        if primary_schema:
+            graph.append(primary_schema)
+    
+    # Supporting entities
+    if metadata.get('canonical') or metadata.get('title'):
+        graph.append(generate_breadcrumb(metadata, html_parser))
+    
+    if sitewide_entities or html_parser:
+        graph.append(generate_organization(sitewide_entities, html_parser, html))
+    
+    # Use existing schema for comparison/validation, but generate from HTML
+    # Don't rely on existing schema - it may be wrong/incomplete
+    faq = generate_faq(html_parser, html)
+    if faq:
+        graph.append(faq)
+    
+    videos = generate_video_objects(html_parser, html)
+    graph.extend(videos)
+    
+    howto = generate_howto(html_parser, html)
+    if howto:
+        graph.append(howto)
+    
+    datasets = generate_dataset(html_parser)
+    graph.extend(datasets)
+    
+    # Output schema
+    if len(graph) == 1:
+        print(json.dumps(graph[0], indent=2))
+    else:
+        print(json.dumps({"@graph": graph}, indent=2))
+    
+    # Validate schema
+    print("\n" + "-" * 60)
+    print("SCHEMA VALIDATION")
+    print("-" * 60)
+    
+    try:
+        from schema_validator import SchemaValidator
+        validator = SchemaValidator()
+        schema_data = graph[0] if len(graph) == 1 else {"@graph": graph}
+        report = validator.validate(schema_data)
+        
+        if report['valid']:
+            print("✅ Schema is valid according to schema.org rules")
+        else:
+            print("❌ Schema has validation errors:")
+            for error in report['errors']:
+                print(f"   • {error}")
+        
+        if report['warnings']:
+            print(f"\n⚠️  {len(report['warnings'])} warning(s):")
+            for warning in report['warnings']:
+                print(f"   • {warning}")
+            
+            # Add fix suggestions
+            if any('thumbnailUrl' in w for w in report['warnings']):
+                print("\n💡 TIP: Add thumbnailUrl to VideoObject (e.g., https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)")
+            if any('uploadDate' in w for w in report['warnings']):
+                print("💡 TIP: Add uploadDate to VideoObject in YYYY-MM-DD format")
+    except Exception as e:
+        print(f"⚠️  Validation skipped: {e}")
+    
+    # Implementation notes
+    print("\n" + "-" * 60)
+    print("IMPLEMENTATION NOTES")
+    print("-" * 60)
+    notes = generate_implementation_notes(primary_type, existing_schema, metadata)
+    for note in notes:
+        print(f"  • {note}")
+    
+    print("\n" + "=" * 60)
+    
+    # Generate report if requested
+    if args.report:
+        print("\nGenerating Google Doc report...")
+        try:
+            import os
+            from pathlib import Path
+            
+            # Save schema to temp file for report generator
+            schema_file = '/tmp/schema_output.json'
+            with open(schema_file, 'w') as f:
+                json.dump({"@graph": graph} if len(graph) > 1 else graph[0], f, indent=2)
+            
+            # Call report generator
+            report_script = Path(__file__).parent / 'generate_report.py'
+            import subprocess
+            result = subprocess.run(
+                ['python3', str(report_script), args.url, schema_file, '/tmp/report.md', '/tmp/generator_output.txt'],
+                capture_output=True, text=True
+            )
+            
+            print(result.stdout)
+            if result.stderr:
+                print(f"Report warnings: {result.stderr}")
+        except Exception as e:
+            print(f"⚠️  Report generation failed: {e}")
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,51 @@
+{
+  "title": "Linear Priority → Create Calendar Event",
+  "description": "Automatically create Google Calendar events for high-priority Linear issues",
+  "steps": [
+    {
+      "id": 1,
+      "type": "trigger",
+      "app": "Linear",
+      "event": "New Issue",
+      "config": {
+        "team": "a previous employer"
+      }
+    },
+    {
+      "id": 2,
+      "type": "filter",
+      "app": "Filter by Zapier",
+      "config": {
+        "conditions": [
+          {
+            "field": "{{step1.priority_label}}",
+            "operator": "contains",
+            "value": "High"
+          },
+          {
+            "logic": "OR",
+            "field": "{{step1.priority_label}}",
+            "operator": "contains",
+            "value": "Urgent"
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "action",
+      "app": "Google Calendar",
+      "event": "Create Detailed Event",
+      "config": {
+        "calendar": "primary",
+        "summary": "[TODO] {{step1.title}}",
+        "description": "Linear Issue ID: {{step1.id}}\nPriority: {{step1.priority_label}}\nEstimate: {{step1.estimate}} points\n\n{{step1.description}}\n\nLink: {{step1.url}}",
+        "start_date_time": "{{step1.due_date__minus_1_day}} 09:00",
+        "end_date_time": "{{step1.due_date__minus_1_day}} {{step1.estimate__plus_9}}:00",
+        "all_day": false,
+        "event_color": "5",
+        "timezone": "Europe/London"
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+*.swp
+*.swo
+
+# Hermes-specific (not needed in shared repo)
+.clawhub/
+.openclaw/
+.node-version
+.eslintcache
+.npm/
+.yarn/
+*.log
+
+# Session and runtime data
+sessions/
+cron/
+memories/
+
+# Build artifacts
+dist/
+build/
+*.pyc
+__pycache__/
+node_modules/
+
+# CI
+.travis.yml
+.package-lock.json

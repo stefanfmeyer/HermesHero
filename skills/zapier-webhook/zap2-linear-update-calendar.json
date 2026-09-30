@@ -1,0 +1,72 @@
+{
+  "title": "Linear Status Update → Update Calendar Event",
+  "description": "Update Google Calendar event title with status emoji when Linear issue status changes",
+  "steps": [
+    {
+      "id": 1,
+      "type": "trigger",
+      "app": "Linear",
+      "event": "Updated Issue",
+      "config": {
+        "team": "a previous employer"
+      }
+    },
+    {
+      "id": 2,
+      "type": "action",
+      "app": "Google Calendar",
+      "event": "Find Event",
+      "config": {
+        "calendar": "primary",
+        "search_term": "Linear Issue ID: {{step1.id}}",
+        "search_by": "description"
+      }
+    },
+    {
+      "id": 3,
+      "type": "action",
+      "app": "Formatter by Zapier",
+      "event": "Lookup Table",
+      "config": {
+        "input": "{{step1.state_name}}",
+        "lookup_table": {
+          "Todo": "⚪ TODO",
+          "In Progress": "🔵 IN PROGRESS",
+          "Done": "✅ DONE",
+          "Canceled": "❌ CANCELED",
+          "Backlog": "⚫ BACKLOG"
+        },
+        "default_value": "⚪ TODO"
+      }
+    },
+    {
+      "id": 4,
+      "type": "action",
+      "app": "Formatter by Zapier",
+      "event": "Lookup Table",
+      "config": {
+        "input": "{{step1.state_name}}",
+        "lookup_table": {
+          "Todo": "5",
+          "In Progress": "9",
+          "Done": "10",
+          "Canceled": "8",
+          "Backlog": "7"
+        },
+        "default_value": "5"
+      }
+    },
+    {
+      "id": 5,
+      "type": "action",
+      "app": "Google Calendar",
+      "event": "Update Event",
+      "config": {
+        "calendar": "primary",
+        "event_id": "{{step2.id}}",
+        "summary": "{{step3.output}}: {{step1.title}}",
+        "event_color": "{{step4.output}}"
+      }
+    }
+  ]
+}

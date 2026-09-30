@@ -1,0 +1,64 @@
+# HermesAgent state that must never be committed
+.env
+auth.json
+auth.lock
+config.yaml
+google_client_secret.json
+google_token.json
+*.key
+*.pem
+
+# Sessions & transcripts (confidential)
+sessions/
+sessions-md/
+state.db
+state.db-wal
+state.db-shm
+sessions.db
+*.jsonl
+
+# Memory contents (confidential) — templates in memories/ are fine
+memories/*.db
+memories/*.lock
+
+# Hindsight live data
+hindsight/config.json
+.hindsight/
+pg0/
+
+# Runtime state
+logs/
+cache/
+node/
+lsp/
+gateway/
+gateway.pid
+gateway.lock
+gateway_state.json
+processes.json
+pairing/
+checkpoints/
+plans/
+notes/
+audio_cache/
+image_cache/
+kanban.db*
+verification_evidence.db
+web-ui-build-stamp.json
+models_dev_cache.json
+context_length_cache.yaml
+channel_directory.json
+discord_threads.json
+discord_ingest/
+system-monitor/
+sandboxes/
+state/
+secrets/
+vercel-mcp-tokens.json
+bounce-gateway.sh
+hermes-agent/
+gws-venv/
+bin/
+__pycache__/
+*.pyc
+.DS_Store

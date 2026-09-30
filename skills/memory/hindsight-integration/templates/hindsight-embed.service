@@ -1,0 +1,32 @@
+[Unit]
+Description=Hindsight Embed Daemon Supervisor (Hermes/the agent)
+Documentation=https://hermes-agent.nousresearch.com/docs
+After=network-online.target
+Wants=network-online.target
+# If the gateway service exists, start before it (so memory is warm when agents boot)
+After=hermes-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=$HOME
+EnvironmentFile=$HOME/.hindsight/profiles/hermes.env
+Environment="PATH=$HOME/.local/bin:$HOME/.hermes/hermes-agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Run the supervisor loop directly — systemd tracks THIS process.
+# The supervisor itself polls /health and restarts the Hindsight daemon on failure.
+ExecStart=$HOME/.hermes/scripts/hindsight-supervisor.sh
+ExecStop=/bin/bash -c 'pkill -9 -f hindsight-supervisor.sh; pkill -9 -f hindsight-api; pkill -9 -f "hindsight-embed-hermes"'
+# Restart the whole supervisor if it dies (covers unexpected exits)
+Restart=always
+RestartSec=10
+# Give the daemon + postgres time to start; the supervisor itself starts fast
+TimeoutStartSec=180
+# Hard kill if the supervisor hangs (it shouldn't — main loop is sleep-based)
+TimeoutStopSec=30
+# Don't let supervisor restart forever in a tight loop; rate-limit
+StartLimitIntervalSec=300
+StartLimitBurst=10
+StandardOutput=append:$HOME/.hermes/logs/hindsight-systemd.log
+StandardError=append:$HOME/.hermes/logs/hindsight-systemd.log
+
+[Install]
+WantedBy=default.target

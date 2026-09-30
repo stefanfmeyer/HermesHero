@@ -1,0 +1,22 @@
+[Unit]
+Description=Hindsight Embed Daemon Supervisor (Hermes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.hindsight/profiles/hermes.env
+Environment="PATH=%h/.local/bin:%h/.hermes/hermes-agent/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=%h/.hermes/scripts/hindsight-supervisor.sh
+ExecStop=/bin/bash -c 'pkill -9 -f hindsight-supervisor.sh; pkill -9 -f hindsight-api; pkill -9 -f "hindsight-embed-hermes"'
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+StartLimitIntervalSec=300
+StartLimitBurst=10
+StandardOutput=append:%h/.hermes/logs/hindsight-systemd.log
+StandardError=append:%h/.hermes/logs/hindsight-systemd.log
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,373 @@
+#!/bin/bash
+#===============================================
+# Keyword Research Finder — Main Script
+#===============================================
+# Identifies the full keyword opportunity for a landing page.
+# Combines: existing signals + competitor SERP themes +
+#           DataForSEO expansion + search intent signals
+#
+# Usage:
+#   keyword_finder --primary "CRM software" --country "United Kingdom"
+#   keyword_finder --url "https://example.com" --country "United Kingdom"
+#   keyword_finder --primary "CRM" --url "https://example.com" --country "UK"
+#
+# Options:
+#   --primary        Primary keyword (required if --url not provided)
+#   --url            URL of page to analyse (required if --primary not provided)
+#   --country        Country name (required)
+#   --competing-urls Comma-separated URLs of competing pages (to avoid cannibalisation)
+#   --competing-file Path to file with competing URLs (one per line)
+#   --page-type      Optional page type hint (product/pricing/comparison/info)
+#   --existing       Path to file with existing keywords (one per line)
+#   --gsc            Path to Search Console CSV export
+#   --modifiers      Additional comma-separated modifiers
+#
+# Output: Structured keyword research report
+#===============================================
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(dirname "$SCRIPT_DIR")"
+CREDS_FILE="$HOME/.openclaw/credentials.json"
+SPEND_TRACKER="$HOME/.openclaw/dataforseo_spend.json"
+
+# Default modifiers
+DEFAULT_MODIFIERS="best,top,cheap,cost,price,pricing,review,reviews,comparison,compare,alternative,vs,alternative to,comparison of,features,benefits,pros,cons,what is,how to,guide,tutorial"
+
+# Parse arguments
+PRIMARY=""
+URL=""
+COUNTRY=""
+COMPETING_URLS=""
+COMPETING_FILE=""
+PAGE_TYPE=""
+EXISTING_FILE=""
+GSC_FILE=""
+MODIFIERS=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --primary)        PRIMARY="$2";           shift 2 ;;
+    --url)            URL="$2";               shift 2 ;;
+    --country)        COUNTRY="$2";           shift 2 ;;
+    --competing-urls) COMPETING_URLS="$2";    shift 2 ;;
+    --competing-file) COMPETING_FILE="$2";    shift 2 ;;
+    --page-type)      PAGE_TYPE="$2";         shift 2 ;;
+    --existing)       EXISTING_FILE="$2";     shift 2 ;;
+    --gsc)            GSC_FILE="$2";          shift 2 ;;
+    --modifiers)      MODIFIERS="$2";         shift 2 ;;
+    *) echo "Unknown option: $1"; exit 1 ;;
+  esac
+done
+
+# Validate inputs
+if [[ -z "$PRIMARY" && -z "$URL" ]]; then
+  echo "ERROR: At least one of --primary or --url is required." >&2
+  exit 1
+fi
+
+if [[ -z "$COUNTRY" ]]; then
+  echo "ERROR: --country is required." >&2
+  exit 1
+fi
+
+# Warn if no competing URLs provided
+if [[ -z "$COMPETING_URLS" && -z "$COMPETING_FILE" ]]; then
+  echo "⚠️  WARNING: No competing URLs provided. Keyword suggestions may cannibalise existing pages."
+  echo "   Recommended: Use --competing-urls or --competing-file to avoid cannibalisation."
+  echo ""
+fi
+
+# Merge modifiers
+ALL_MODIFIERS="${MODIFIERS:-$DEFAULT_MODIFIERS}"
+
+echo "============================================"
+echo "KEYWORD RESEARCH FINDER"
+echo "============================================"
+echo "Started: $(date)"
+echo ""
+
+#============================================
+# STEP 0 — Load credentials & check budget
+#============================================
+LOGIN=$(python3 -c "import json; print(json.load(open('$CREDS_FILE'))['dataforseo']['login'])" 2>/dev/null)
+PASSWORD=$(python3 -c "import json; print(json.load(open('$CREDS_FILE'))['dataforseo']['password'])" 2>/dev/null)
+
+if [[ -z "$LOGIN" || -z "$PASSWORD" ]]; then
+  echo "ERROR: DataForSEO credentials not found in $CREDS_FILE" >&2
+  exit 1
+fi
+
+AUTH_BASE64=$(echo -n "$LOGIN:$PASSWORD" | base64 | tr -d '\n')
+export AUTH_BASE64
+
+TODAY=$(date +%Y-%m-%d)
+TODAY_SPEND=$(python3 -c "import json; d=json.load(open('$SPEND_TRACKER')) if __import__('os').path.exists('$SPEND_TRACKER') else {}; print(d.get('$TODAY','0'))" 2>/dev/null || echo "0")
+echo "[Budget] Today's spend so far: \$$TODAY_SPEND"
+echo ""
+
+#============================================
+# STEP 1 — Identify core search topic
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 1 — Identifying core search topic"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+if [[ -n "$PRIMARY" ]]; then
+  CORE_KEYWORD="$PRIMARY"
+  echo "Using provided primary keyword: $CORE_KEYWORD"
+else
+  echo "Fetching page content from: $URL"
+  CONTENT=$(python3 "$SCRIPT_DIR/fetch_url.py" "$URL" 2>/dev/null || echo "")
+
+  if [[ -z "$CONTENT" ]]; then
+    echo "ERROR: Could not fetch URL content. Please provide --primary instead." >&2
+    exit 1
+  fi
+
+  # Extract likely primary keyword from page content
+  CORE_KEYWORD=$(python3 "$SCRIPT_DIR/extract_topic.py" "$CONTENT" "$PAGE_TYPE" 2>/dev/null || echo "unknown")
+  echo "Inferred primary topic from URL: $CORE_KEYWORD"
+fi
+
+echo ""
+# Normalise country name to DataForSEO format
+LOCATION_NAME="$COUNTRY"
+echo "Country: $LOCATION_NAME"
+echo ""
+
+#============================================
+# STEP 2 — Load existing keyword signals
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 2 — Existing keyword signals"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+EXISTING_KEYWORDS=""
+if [[ -n "$EXISTING_FILE" && -f "$EXISTING_FILE" ]]; then
+  EXISTING_KEYWORDS=$(cat "$EXISTING_FILE" | grep -v '^#' | grep -v '^$' | head -100 | tr '\n' '|')
+  EXISTING_COUNT=$(echo "$EXISTING_KEYWORDS" | grep -c '^' || echo 0)
+  echo "Loaded $EXISTING_COUNT existing keywords from file"
+elif [[ -n "$GSC_FILE" && -f "$GSC_FILE" ]]; then
+  # Parse GSC CSV (typically: Query, Clicks, Impressions, CTR, Position)
+  EXISTING_KEYWORDS=$(tail -n +2 "$GSC_FILE" | cut -d',' -f1 | grep -v '^$' | head -100 | tr '\n' '|')
+  echo "Loaded GSC keywords from CSV"
+fi
+
+if [[ -z "$EXISTING_KEYWORDS" ]]; then
+  echo "No existing keyword file provided — starting fresh"
+else
+  echo "Existing keywords loaded (will be used for relevance filtering)"
+fi
+echo ""
+
+#============================================
+# STEP 2.5 — Extract competing keywords
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 2.5 — Extracting competing keywords"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+COMPETING_KEYWORDS=""
+COMPETING_URL_LIST=""
+
+# Build list of competing URLs
+if [[ -n "$COMPETING_URLS" ]]; then
+  COMPETING_URL_LIST=$(echo "$COMPETING_URLS" | tr ',' '\n')
+fi
+
+if [[ -n "$COMPETING_FILE" && -f "$COMPETING_FILE" ]]; then
+  COMPETING_URL_LIST="$COMPETING_URL_LIST\n$(cat "$COMPETING_FILE" | grep -v '^#' | grep -v '^$')"
+fi
+
+COMPETING_URL_LIST=$(echo -e "$COMPETING_URL_LIST" | sort -u | grep -v '^$')
+COMPETING_COUNT=$(echo "$COMPETING_URL_LIST" | grep -c '^' || echo 0)
+
+if [[ $COMPETING_COUNT -gt 0 ]]; then
+  echo "Found $COMPETING_COUNT competing URLs to analyse:"
+  echo "$COMPETING_URL_LIST" | head -10 | while read url; do
+    echo "  - $url"
+  done
+  if [[ $COMPETING_COUNT -gt 10 ]]; then
+    echo "  ... and $((COMPETING_COUNT - 10)) more"
+  fi
+  echo ""
+
+  # Save URLs to temp file and extract keywords
+  COMPETING_TEMP=$(mktemp)
+  echo "$COMPETING_URL_LIST" > "$COMPETING_TEMP"
+  
+  COMPETING_KEYWORDS=$(python3 "$SCRIPT_DIR/extract_competing_keywords.py" "$COMPETING_TEMP" 2>/dev/null | grep -A1000 '=== COMPETING KEYWORDS ===' | tail -n +2 | python3 -c "import sys,json; kws=json.load(sys.stdin); print('\n'.join(kws))" 2>/dev/null || echo "")
+  
+  rm -f "$COMPETING_TEMP"
+  
+  COMPETING_KW_COUNT=$(echo "$COMPETING_KEYWORDS" | grep -c '^' || echo 0)
+  echo "Extracted $COMPETING_KW_COUNT competing keyword signals"
+else
+  echo "No competing URLs provided — skipping cannibalisation check"
+fi
+echo ""
+
+#============================================
+# STEP 3 — DataForSEO keyword expansion
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 3 — Expanding keyword universe (DataForSEO)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "Fetching keyword suggestions from Autocomplete..."
+KW_AUTOCOMPLETE=$(python3 "$SCRIPT_DIR/dfseo_autocomplete.py" \
+  "$CORE_KEYWORD" "$LOCATION_NAME" "$AUTH_BASE64" 2>/dev/null || echo "")
+
+echo "Fetching search volume data..."
+KW_VOLUME=$(python3 "$SCRIPT_DIR/dfseo_keyword_volume.py" \
+  "$CORE_KEYWORD" "$LOCATION_NAME" "$AUTH_BASE64" 2>/dev/null || echo "")
+
+echo "Fetching keyword ideas from DataForSEO Labs..."
+KW_IDEAS=$(python3 "$SCRIPT_DIR/dfseo_keyword_ideas.py" \
+  "$CORE_KEYWORD" "$LOCATION_NAME" "$AUTH_BASE64" 2>/dev/null || echo "")
+
+# Combine autocomplete + keyword_ideas
+ALL_KW=$(echo -e "$KW_AUTOCOMPLETE\n$KW_IDEAS" | \
+  sort -u | grep -v "^$" | head -200)
+
+KW_COUNT=$(echo "$ALL_KW" | grep -c '^' || echo 0)
+echo "Collected $KW_COUNT keyword suggestions (Autocomplete + Labs)"
+echo ""
+
+#============================================
+# STEP 4 — SERP competitor analysis
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 4 — Analysing competitor keyword themes (SERP)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+echo "Fetching top 20 ranking URLs for: $CORE_KEYWORD"
+SERP_RESULT=$(python3 "$SCRIPT_DIR/dfseo_serp.py" \
+  "$CORE_KEYWORD" "$LOCATION_NAME" "$AUTH_BASE64" 2>/dev/null || echo "")
+
+# Parse ranking URLs from SERP response
+RANKING_URLS=$(echo "$SERP_RESULT" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    urls = []
+    results = data.get('tasks', [{}])[0].get('result', [])
+    for r in results[:20]:
+        items = r.get('items', [])
+        for item in items[:5]:
+            url = item.get('url','')
+            if url:
+                urls.append(url)
+    print('\n'.join(urls[:20]))
+except:
+    print('')
+" 2>/dev/null || echo "")
+
+SERP_URL_COUNT=$(echo "$RANKING_URLS" | grep -c '^' || echo 0)
+echo "Found $SERP_URL_COUNT ranking URLs to analyse"
+echo ""
+
+# Extract keyword themes from SERP
+echo "Detecting keyword themes from competitor content..."
+THEMES_JSON=$(python3 "$SCRIPT_DIR/detect_themes.py" "$RANKING_URLS" "$CORE_KEYWORD" "$AUTH_BASE64" 2>/dev/null || echo "[]")
+
+#============================================
+# STEP 5 — Filter for relevance
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 5 — Filtering keywords for relevance"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+FILTERED_KW=$(python3 "$SCRIPT_DIR/filter_keywords.py" \
+  "$ALL_KW" "$CORE_KEYWORD" "$EXISTING_KEYWORDS" "$PAGE_TYPE" "$COMPETING_KEYWORDS" 2>/dev/null || echo "$ALL_KW")
+
+FILTERED_COUNT=$(echo "$FILTERED_KW" | grep -c '^' || echo 0)
+CANNIBALISED_COUNT=$((KW_COUNT - FILTERED_COUNT))
+echo "Filtered from $KW_COUNT → $FILTERED_COUNT keywords (relevance + intent)"
+if [[ $CANNIBALISED_COUNT -gt 0 && -n "$COMPETING_KEYWORDS" ]]; then
+  echo "  ($CANNIBALISED_COUNT excluded to avoid cannibalisation)"
+fi
+echo ""
+
+#============================================
+# STEP 6 — Group into keyword themes
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 6 — Grouping into keyword themes"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+# Merge themes from SERP analysis with filtered keywords
+echo "Detected themes from SERP competitors:"
+echo "$THEMES_JSON" | python3 -c "import sys,json; themes=json.load(sys.stdin); [print(f'  - {t[\"theme\"]}') for t in themes]" 2>/dev/null || echo "  (theme detection complete)"
+echo ""
+
+#============================================
+# STEP 7 — Describe coverage for each theme
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 7 — Describing theme coverage requirements"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+THEME_REPORT=$(python3 "$SCRIPT_DIR/build_theme_report.py" \
+  "$THEMES_JSON" "$FILTERED_KW" "$CORE_KEYWORD" "$PAGE_TYPE" 2>/dev/null || echo "")
+echo "$THEME_REPORT"
+echo ""
+
+#============================================
+# STEP 8 — FAQ opportunities
+#============================================
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 8 — Identifying FAQ opportunities"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+FAQ_KW=$(python3 "$SCRIPT_DIR/extract_questions.py" \
+  "$SERP_RESULT" "$KW_SUGGESTIONS" 2>/dev/null || echo "")
+
+# Filter FAQ keywords for cannibalisation too
+FAQ_FILTERED=$(python3 "$SCRIPT_DIR/filter_keywords.py" \
+  "$FAQ_KW" "$CORE_KEYWORD" "" "" "$COMPETING_KEYWORDS" 2>/dev/null || echo "$FAQ_KW")
+
+FAQ_COUNT=$(echo "$FAQ_FILTERED" | grep -c '^' || echo 0)
+echo "Found $FAQ_COUNT question-based keywords for FAQ content"
+echo ""
+
+#============================================
+# STEP 9 — Cannibalisation report
+#============================================
+if [[ -n "$COMPETING_KEYWORDS" && $CANNIBALISED_COUNT -gt 0 ]]; then
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "STEP 9 — Cannibalisation check"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "Keywords EXCLUDED to avoid cannibalising existing pages:"
+echo "(analysed from $COMPETING_COUNT competing URLs)"
+echo ""
+# Show some examples of what was excluded
+echo "$ALL_KW" | grep -v -F "$FILTERED_KW" | head -10 | while read kw; do
+  echo "  - $kw"
+done
+if [[ $CANNIBALISED_COUNT -gt 10 ]]; then
+  echo "  ... and $((CANNIBALISED_COUNT - 10)) more"
+fi
+echo ""
+fi
+
+#============================================
+# FINAL OUTPUT
+#============================================
+python3 "$SCRIPT_DIR/build_report.py" \
+  "$CORE_KEYWORD" \
+  "$FILTERED_KW" \
+  "$THEMES_JSON" \
+  "$THEME_REPORT" \
+  "$FAQ_FILTERED" \
+  "$EXISTING_KEYWORDS" \
+  "$KW_COUNT" \
+  "$FILTERED_COUNT" \
+  "$SERP_URL_COUNT"
+
+echo ""
+echo "Completed: $(date)"
+echo "============================================"

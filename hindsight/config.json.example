@@ -1,0 +1,7 @@
+{
+  "mode": "local",
+  "llm_provider": "openai",
+  "llm_api_key": "YOUR_API_KEY",
+  "llm_api_base": "<your-openai-compatible-endpoint>",
+  "llm_model": "<your-model>"
+}
