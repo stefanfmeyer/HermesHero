@@ -605,16 +605,16 @@ platform_toolsets:
     - hermes-discord
   whatsapp:
     - hermes-whatsapp
-DISCORD_HOME_CHANNEL: '1491715012845113614'
+DISCORD_HOME_CHANNEL: 'YOUR_CHANNEL_ID'
 GATEWAY_ALLOW_ALL_USERS: false
-DISCORD_ALLOWED_USERS: 646411790733017098,1495809191800209509,1491444150363488327
+DISCORD_ALLOWED_USERS: YOUR_USER_ID
 custom_providers:
   - name: ollama
     base_url: http://127.0.0.1:11434
     api_key: "YOUR_API_KEY"
     api_mode: chat_completions
-FMP_API_KEY: CGeWvDxDUezo2AfrhTDt1drXdtsgFFoX
-NEWSAPI_KEY: 084bc9f7d32d4c02a873766bd0674c3e
+FMP_API_KEY: YOUR_API_KEY
+NEWSAPI_KEY: YOUR_API_KEY
 plugins:
   enabled:
     - web/jina
