@@ -7,8 +7,8 @@ All DataForSEO calls in one script with cost tracking.
 import sys, json, re, urllib.request, urllib.error
 from datetime import date
 
-CREDS_FILE = "/Users/walter/.openclaw/credentials.json"
-SPEND_TRACKER = "/Users/walter/.openclaw/dataforseo_spend.json"
+CREDS_FILE = "~/.openclaw/credentials.json"
+SPEND_TRACKER = "~/.openclaw/dataforseo_spend.json"
 BASE_URL = "https://api.dataforseo.com/v3"
 
 # Load credentials

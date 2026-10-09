@@ -13,10 +13,10 @@ import re
 BASE_URL = "https://api.dataforseo.com/v3"
 
 def get_auth():
-    with open('/Users/walter/.openclaw/credentials.json') as f:
+    with open('~/.openclaw/credentials.json') as f:
         creds = json.load(f)
     dfseo = creds.get('dataforseo', {})
-    login = dfseo.get('login', 'ben@former-employer.co.uk')
+    login = dfseo.get('login', 'YOUR_DATAFORSEO_LOGIN')
     password = dfseo.get('password', '')
     return base64.b64encode(f"{login}:{password}".encode()).decode()
 

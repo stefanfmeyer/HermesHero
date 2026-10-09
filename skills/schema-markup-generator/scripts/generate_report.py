@@ -333,7 +333,7 @@ def upload_to_google_docs(title, content):
     
     try:
         result = subprocess.run(
-            ['gog', '-a', 'walter@former-employer.io', 'docs', 'create', title, '--file', temp_file],
+            ['gog', '-a', 'you@example.com', 'docs', 'create', title, '--file', temp_file],
             capture_output=True, text=True
         )
         

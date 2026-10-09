@@ -554,7 +554,7 @@ def main():
     import subprocess
     title = f"Schema Audit - {args.url.split('/')[-1].replace('-', ' ').title()}"
     result = subprocess.run(
-        ['gog', '-a', 'walter@former-employer.io', 'docs', 'create', title, '--file', args.output],
+        ['gog', '-a', 'you@example.com', 'docs', 'create', title, '--file', args.output],
         capture_output=True, text=True
     )
     

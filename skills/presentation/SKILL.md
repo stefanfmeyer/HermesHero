@@ -14,22 +14,22 @@ Create SEO opportunity presentations for new clients by combining DataForSEO key
 **DataForSEO** (cost cap: $0.10/session):
 ```bash
 # Domain rank overview
-curl -s -u "YmVuQG5lb25nb3JpbGxhLmNvLnVrOjk2OGE1ZmU3OTdmZjI5ZjM=" \
+curl -s -u "DATAFORSEO_BASE64_CREDENTIALS" \
   "https://api.dataforseo.com/v3/dataforseo_labs/domain_rank_overview/live" \
   -d '{"domains":["client-domain.com"]}' | python3 -m json.tool
 
 # Ranked keywords
-curl -s -u "YmVuQG5lb25nb3JpbGxhLmNvLnVrOjk2OGE1ZmU3OTdmZjI5ZjM=" \
+curl -s -u "DATAFORSEO_BASE64_CREDENTIALS" \
   "https://api.dataforseo.com/v3/dataforseo_labs/ranked_domains/live" \
   -d '{"domains":["client-domain.com"],"limit":50}' | python3 -m json.tool
 
 # Competitors
-curl -s -u "YmVuQG5lb25nb3JpbGxhLmNvLnVrOjk2OGE1ZmU3OTdmZjI5ZjM=" \
+curl -s -u "DATAFORSEO_BASE64_CREDENTIALS" \
   "https://api.dataforseo.com/v3/dataforseo_labs/domain_competitors/live" \
   -d '{"domains":["client-domain.com"],"limit":20}' | python3 -m json.tool
 
 # Keyword ideas (related + PAA)
-curl -s -u "YmVuQG5lb25nb3JpbGxhLmNvLnVrOjk2OGE1ZmU3OTdmZjI5ZjM=" \
+curl -s -u "DATAFORSEO_BASE64_CREDENTIALS" \
   "https://api.dataforseo.com/v3/dataforseo_labs/domain_keywords_organic/live" \
   -d '{"domains":["client-domain.com"],"limit":100}' | python3 -m json.tool
 ```
@@ -52,7 +52,7 @@ Use GOG CLI:
 ```bash
 gog docs create "CLIENT NAME — SEO Opportunity Proposal" \
   --file /path/to/proposal.md \
-  --account bruce@former-employer.io
+  --account your-account@example.com
 ```
 
 Then attach to the Linear lead:

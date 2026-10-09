@@ -19,8 +19,8 @@ Store credentials in `~/.openclaw/credentials.json`:
 ```json
 {
   "dataforseo": {
-    "login": "ben@former-employer.co.uk",
-    "password": "968a5fe797ff29f3"
+    "login": "YOUR_DATAFORSEO_LOGIN",
+    "password": "YOUR_DATAFORSEO_PASSWORD"
   }
 }
 ```
